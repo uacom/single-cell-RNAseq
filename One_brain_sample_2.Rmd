@@ -1,0 +1,477 @@
+---
+title: "One brain sample (m10)"
+author: "Foong Lian Chee", revision: "Shenfeng Qiu"
+date: "26/2/2022", able to 'Run All', manual annotate done
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+# Analyzing scRNA-seq Data, 3633 cells
+
+## Initialize relevant libraries
+```{r}
+# [You have to change] set this following work directory to your file location
+setwd("D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample")
+
+library(Seurat)
+library(dplyr)
+library(cowplot)
+library(ggplot2)
+library(rstatix)
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+ #install.packages("BiocManager")
+
+#BiocManager::install("SingleCellExperiment")
+library(SingleCellExperiment)
+
+```
+
+## Import Group A
+```{r}
+# You might need to change the location to direct to your data folder
+data.m10<- Read10X("D:/Bioinformatics Projects/LindseyAanalysis/single_cell/slim_counts/m10")
+
+gallitano <- CreateSeuratObject(counts=data.m10)
+
+gallitano[["percent.mt"]] <- PercentageFeatureSet(gallitano, pattern = "^mt-") 
+rm(data.m10)
+
+dim(gallitano)
+# 27998 15772
+```
+
+# Quality Control
+# The rationale to remove the low quality cells are based on several metrics:
+# 1. ncount_RNA: number of UMIs(unique molecular IDs) per cell
+  - this should be around 50-80% of the number of cells you loaded (calculated using a hemocytometer or automated cell counter,
+  might not accurate if measured by FACS machine or Bioanalyzer)
+
+# 2. nFeature_RNA: number of genes detected per cell
+  - Ideally, it should have similar number of UMIs as we expect one cell contains the same amount of UMIs and no. of genes
+  
+# 3. percent.mt: percentage of cell reads originating from the mitochondrial genes
+- large amount of mitochondrial genes in a cell indicates a contamination from dead or dying cell. Therefore, it is common to set the threshold to define poor quality cells as those with more than 0.2 mitochondrial ratio, unless it is expected to have more mitoRatio in your sample cell type.
+
+```{r}
+# For all the png function in the following, try to replace the url address with your output folder
+# you can use the "Ctrl + F" the search bar, to replace all the relevant folder address
+
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/QC_beforefiltering.png",
+    width = 600, height = 1000)
+VlnPlot(gallitano, 
+        features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+        ncol = 3) + ggtitle("Quality assessment before filtering")
+dev.off()
+
+library(patchwork)
+
+png(file = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/QC_FeatureScatter.png", width = 1000, height = 500) #skip this line to output to console, or after png file is generated and dev.off, then run the following lines to output to console
+
+plot1 <- FeatureScatter(gallitano, feature1 = "nCount_RNA", feature2 = "percent.mt") 
+line.data <- data.frame(yintercept = c(1500, 7500), Lines = c("lower", "upper"))
+line2.data <- data.frame(xintercept = c(500), Lines = c("lower"))
+
+plot2 <- FeatureScatter(gallitano, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_hline(aes(yintercept = yintercept, linetype = Lines), line.data) + geom_vline(aes(xintercept = xintercept, linetype = Lines), line2.data)
+
+plot1 + plot2 +  plot_layout(guides = 'collect') + plot_annotation(title = "Quality assessment before filtering")
+dev.off()
+```
+
+# 4. Joint filtering effects:
+We also want to consider the joint filtering effect.
+Cells that are poor quality are likely to have low genes and UMIs per cell
+
+```{r}
+# joint filtering effect
+# Visualize the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+metadata <- gallitano@meta.data
+png(file = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/QC_jointfilteringeffect.png", width = 600, height = 500) #skip this line to output to console, or after png file is generated and dev.off, then run the following lines to output to console
+
+metadata %>% 
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = c(1500, 7500))
+dev.off()
+
+rm(line.data,line2.data,metadata,plot1,plot2)
+```
+
+
+## Selecting Data Subset
+# I follow the original script to filter based on these criteria:
+nFeature_RNA < 7500& nFeature_RNA>1500 & nCount_RNA > 500 
+# and then, I added the filtering criteria of "percent.mt < 20"
+# P/S: we can always adjust this part if we want to preserve more or less no. of UMI, no. of genes, and cells with higher or lower percent.mt
+```{r}
+gallitano <- subset(gallitano, nFeature_RNA < 7500 & 
+                      nFeature_RNA>1500 & nCount_RNA > 500 & 
+                      percent.mt < 20)
+
+
+# Output a logical vector for every gene on whether the more than zero counts per cell
+# Extract counts
+counts <- GetAssayData(object = gallitano, slot = "counts")
+# Output a logical vector for every gene on whether the more than zero counts per cell
+nonzero <- counts > 0
+# Sums all TRUE values and returns TRUE if more than 100 TRUE values per gene
+keep_genes <- Matrix::rowSums(nonzero) >= 100
+# Only keeping those genes expressed in more than 100 cells
+filtered_counts <- counts[keep_genes, ]
+# Reassign to filtered Seurat object
+gallitano <- CreateSeuratObject(filtered_counts, meta.data = gallitano@meta.data)
+
+rm(filtered_counts,nonzero, counts, keep_genes)
+```
+
+## Reaccess quality metrics
+```{r}
+dim(gallitano)
+# 12090 genes x 3633 cells (or UMIs)
+
+png(file = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/QC_afterfiltering.png", width = 800, height = 800) #skip this line to output to console, or after png file is generated and dev.off, then run the following lines to output to console
+VlnPlot(gallitano, 
+        features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+        ncol = 3) + ggtitle("Quality assessment after filtering")
+dev.off()
+
+png(file = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/QC_FeatureScatter_after.png", width = 1000, height = 500)
+plot1 <- FeatureScatter(gallitano, feature1 = "nCount_RNA", feature2 = "percent.mt") 
+line.data <- data.frame(yintercept = c(1500, 7500), Lines = c("lower", "upper"))
+line2.data <- data.frame(xintercept = c(500), Lines = c("lower"))
+
+plot2 <- FeatureScatter(gallitano, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_hline(aes(yintercept = yintercept, linetype = Lines), line.data) + geom_vline(aes(xintercept = xintercept, linetype = Lines), line2.data)
+
+plot1 + plot2 +  plot_layout(guides = 'collect') + plot_annotation(title = "Quality assessment after filtering")
+dev.off()
+
+metadata <- gallitano@meta.data
+png(file = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/QC_jointfilteringeffect_after.png", width = 600, height = 500) #skip this line to output to console, or after png file is generated and dev.off, then run the following lines to output to console
+metadata %>% 
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = c(1500, 7500))
+dev.off()
+
+rm(line.data,line2.data,metadata,plot1,plot2)
+```
+
+
+## Apply sctransform normalization
+This steps can replace NormalizeData(), ScaleData(), and FindVariableFeatures(). The results of sctransform are stored in the "SCT" assay. This method is assumed to reveals sharper biological distinctions compared to the standard Seurat workflow. 
+
+We may also choose to regress out other metrics such as ""cell cycle score,"nCount_RNA" or "nFeature_RNA", to get a even distribition of these metrics in the cluster map (e.g. UMAP). 
+```{r}
+gallitano <- SCTransform(gallitano, vars.to.regress = "percent.mt")
+
+```
+
+## Perform PCA and UMAP analysis to obtain dimensional reduction of the cell populations
+## and clustering analysis
+
+```{r}
+gallitano <- RunPCA(object = gallitano)
+gallitano <- RunUMAP(gallitano, dims=1:20, reduction = 'pca')
+gallitano <- RunTSNE(gallitano, reduction = 'pca')
+gallitano <- FindNeighbors(gallitano, dims=1:20)
+gallitano <- FindClusters(gallitano, resolution = c(0.05, 0.5))
+```
+
+## Clustering quality control
+This step gives us some idea about how is the distribution of the number of genes, number of UMIs, and percentage of mitochondrial genes in each cluster. 
+Normally, we expect to see similar distribution of no. of genes (nFeature_RNA) and no. of UMIs (nCount_RNA). 
+
+As for the percent.mt (percentage of mitochondrial genes per cell), it can be a reference to check if those high intensity clusters might be having poor quality cells (if so, we can try to remove in the next step or adjust the metrics in the previous filtering step) or it might be due to the differences biologically
+
+```{r}
+# Determine metrics to plot present in seurat_integrated@meta.data
+metrics <-  c("nFeature_RNA", "nCount_RNA", "percent.mt")
+
+png(file = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/QC_Featureplot_after.png", width = 1000, height = 800)
+FeaturePlot(gallitano, 
+            reduction = "umap", 
+            features = metrics,
+            pt.size = 0.4, 
+            sort.cell = TRUE,
+            min.cutoff = 'q10',
+            label = TRUE)
+dev.off()
+
+```
+
+# Differential expression analysis
+We can find the differential expressed genes in each cluster against all other clusters using the function "FindAllMarkers", "only.pos = TRUE" is for returning DEGs with only positive log2FC, "logFC.threshold" is to return results with only 0.25 log2FC and above, "min.pct" is for returning results with those DEGs having more than 25% coverage in the particular cluster. By default, the function uses Wilcoxon ranked sum test to define DEGs.
+
+We will have to play around with the parameters here for differnt purpose. We normally set higher threshold (only.pos = TRUE, higher min.pct, and higher logFC.threshold) when we want to look for the cluster markers for identifying the cell type of respective clusters.
+
+Then, we can lower the threshold parameter, to obtain the DEGs list when we want to get the gene set annotation/ gene set enrichment in comparison of subset of cell types or clusters-of-interest or samples.
+```{r}
+Idents(gallitano)<- "SCT_snn_res.0.5"
+gallitano.markers <- FindAllMarkers(gallitano, only.pos=TRUE, min.pct=0.25, logfc.threshold=0.25)
+# save it in a csv format
+write.csv(gallitano.markers, "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/gallitano_markers_onesample_20220226.csv")
+```
+
+## Identifying cell type
+## Option 1: SingleR package with built-in reference
+I use a collection of mouse bulk RNA-seq data sets obtained from celldex package (Benayoun et al. 2019). A variety of cell types are available, mostly from blood but also covering several other tissues. This identifies marker genes from the reference and uses them to compute assignment scores (based on the Spearman correlation across markers) for each cell in the test dataset against each label in the reference. The label with the highest score is the assigned to the test cell, possibly with further fine-tuning to resolve closely related labels.
+
+This reference consists of a collection of mouse bulk RNA-seq data sets downloaded from the gene expression omnibus (Benayoun et al. 2019). A variety of cell types are available, again mostly from blood but also covering several other tissues.
+
+```{r}
+#BiocManager::install("SingleR")
+#BiocManager::install("celldex")
+#install.packages("pheatmap")
+library(SingleR)
+library(celldex)
+library(pheatmap)
+
+ref <- MouseRNAseqData()
+ table(Idents(object = gallitano))
+
+hpca.se <- SingleR(test = gallitano@assays$RNA@data, ref = ref,
+                    labels = ref$label.main)
+
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/plotScoreHeatmap_m10.png", width = 600, height = 500)
+plotScoreHeatmap(hpca.se)
+dev.off()
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/plotDeltaDistribution_m10.png",
+    width = 1000, height = 1400)
+plotDeltaDistribution(hpca.se, ncol = 3)
+dev.off()
+
+all.markers <- metadata(hpca.se)$de.genes
+gallitano$labels_hpca <- hpca.se$labels
+# Extract identity and sample information from seurat object to determine the number of cells per cluster per sample
+n_cells <- FetchData(gallitano, 
+                     vars = c("SCT_snn_res.0.5",
+                              "labels_hpca")) %>%
+  dplyr::count(SCT_snn_res.0.5,
+               labels_hpca) %>%
+  tidyr::spread(SCT_snn_res.0.5, n)
+
+View(n_cells)
+# save it in a table (with csv format, you can open in any )
+write.csv(n_cells, "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/n_cells_mouseRNAseqData_onesample.csv")
+
+## comparing with the unsupervised clustering
+tab <- table(cluster= gallitano$SCT_snn_res.0.5, label= hpca.se$labels) 
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/pheatmap_SingleR_m10.png",
+    width = 600, height = 500)
+pheatmap::pheatmap(log10(tab+10))
+dev.off()
+
+```
+
+
+## Option 2: manual annotation
+# refer to the gallitano original script
+Plotting Astrocyte Markers
+```{r}
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/astrocyte_marker_score.png", width = 1500, height = 400)
+VlnPlot(object = gallitano, features =c("Aqp4","Prdx6","Pla2g7"))
+dev.off()
+```
+
+Plotting Microglia Markers
+```{r}
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/microglia_marker_score.png", width = 1500, height = 400)
+VlnPlot(object = gallitano, features =c("C1qc","Ly86", "Tmem119","Cx3cr1"))
+dev.off()
+```
+
+Plotting Endothelial Markers
+```{r}
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/endothelial_marker_score.png", width = 1500, height = 400)
+VlnPlot(object = gallitano, features =c("Ly6a",  "Ly6c1",  "Pltp"))
+dev.off()
+```
+Plotting Oligodendrocyte Markers
+```{r}
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/oligoDC_marker_score.png", width = 1500, height = 400)
+VlnPlot(object = gallitano, features =c("Mag",  "Mbp",  "Cldn11"))
+dev.off()
+```
+Plotting Glutamatergic Neuron Markers
+```{r}
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/Glutamatergic_Neuron_marker_score.png", width = 1500, height = 400)
+VlnPlot(object = gallitano, features =c("Nrgn", "Sv2b",  "Arpp19"))
+dev.off()
+```
+Plotting Gabaergic Neuron Markers
+```{r}
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/Gabaergic_Neuron_marker_score.png", width = 1500, height = 400)
+VlnPlot(object = gallitano, features =c("Gad1",  "Gad2",  "Rab3b" ))
+dev.off()
+```
+Plotting Oligodendrocyte Precursor Markers
+```{r}
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/OligoDC_Precursor_marker_score.png", width = 1500, height = 400)
+VlnPlot(object = gallitano, features =c("Pdgfra",  "Cspg4",  "Gm2a"))
+dev.off()
+```
+
+## Rename cluster based on the SingleR results and manual annotation
+
+```{r}
+gallitano <- RenameIdents(object = gallitano, 
+                         "0" = "Neurons(Glutamatergic)",
+                         "1" = "Astrocytes",
+                         "2" = "Endothelial cells",
+                         "3" = "Neurons(Glutamatergic)",
+                         "4" = "Microglia",
+                         "5" = "Neurons(Glutamatergic)",
+                         "6" = "Oligodendrocytes",
+                         "7" = "Neurons(Gabaergic)",
+                         "8" = "Neurons(Glutamatergic)",
+                         "9" = "Neurons(Glutamatergic)",
+                         "10" = "OGC_precursor",
+                         "11" = "Neurons(Glutamatergic)",
+                         "12" = "Neurons(Glutamatergic)",
+                         "13" = "Neurons(Glutamatergic)",
+                         "14" = "Fibroblast",
+                         "15" = "Fibroblast",
+                         "16" = "Endothelial cells")
+gallitano$celltype_LC <- gallitano@active.ident
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/UMAP_res0.5.png", 
+    width = 500, height = 400)
+
+DimPlot(gallitano,
+                reduction = "umap",
+                group.by = "SCT_snn_res.0.5",
+                label = TRUE,
+)
+dev.off()
+
+Idents(object = gallitano) <- "celltype_LC"
+
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/UMAP_res0.5_samples.png", 
+    width = 1200, height = 500)
+plot <- DimPlot(gallitano,
+                reduction = "umap",
+                group.by = "celltype_LC",
+                label = FALSE,
+)
+dev.off()
+plot$data$seurat_clusters <- gallitano@meta.data$SCT_snn_res.0.5
+all(rownames(plot$data) == rownames(gallitano@meta.data))
+
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/UMAP_res0.5_celltype_LC.png", 
+    width = 600, height = 400)
+LabelClusters(plot, id = "seurat_clusters")
+dev.off()
+```
+
+## Option 3: manual annotation
+Refer to Tasic et al, Nature 2018, marker list
+# https://github.com/AllenInstitute/tasic2018analysis/blob/master/RNA-seq%20Analysis/markers.R
+```{r}
+Inh.markers <- list(c("Gad2","Slc32a1","Prox1","Adarb2","Nfix","Nfib","Cacna2d1",
+                  "Cxcl14","Tnfaip8l3","Cplx3","Lamp5","Cd34","Pax6","Krt73",
+                  "Scrg1","Egln3","Ndnf","Tmem182","Ntn1","Pde11a","Pdlim5",
+                  "Lsp1","Slc35d3","Nkx2-1","Serpinf1","Col14a1","Vip","Sncg",
+                  "Crabp1","Slc10a4","Cldn10","Bhlhe22","Crispld2","Slc17a8",
+                  "Cyb5r2","Nr1h4","Wnt7b","Prss12","Igfbp6","Calb2","Grpr",
+                  "Pthlh","Elfn1","Rspo1","Slc18a3","Lmo1","Rspo4","Sostdc1",
+                  "Chat","Cbln4","Gsx2","Gpc3","Mab21l1","C1ql1","Itih5","Mybpc1",
+                  "Myl1","Lhx6","Sox6","Sst","Chodl","Calb1","Cbln4","Etv1","Edn1",
+                  "Kl","Il1rapl2","Myh8","Ptprk","Chrna2","Myh13","Ptgdr","Crhr2",
+                  "Hpse","Igsf9","C1ql3","Tacstd2","Th","Col6a1","Nts","Tac1","Pvalb",
+                  "Gabrg1","Il7","Bche","Prdm8","Syt2","Ostn","Pdlim3","C1ql1",
+                  "Gpr149","Vipr2","Meis2","Adamts19","Cpa6","Lgr6"))
+Inh.comb.markers <- c("Reln","Cnr1","Nr2f2","Cck","Npy","Crh","Tac2")
+
+Ex.markers <- list(unique(c("Slc17a7","Rtn4rl2","Slc30a3","Cux2","Stard8","Otof","Rrad",
+                            "Penk","Agmat",
+                      "Emx2","S100a3","Macc1","Rorb","Scnn1a","Whrn","Endou","Col26a1",
+                      "Rspo1","Fezf2","Hsd11b1","Batf3","Arhgap25","Colq","Pld5","Olfr78",
+                      "Tcap","Fgf17","Wfdc18","Wfdc17","Aldh1a7","Tgfb1","Ctsc","Rxfp2",
+                      "Prss35","Rgs12","Osr1","Oprk1","Cd52","Col23a1","Col18a1","Car1",
+                      "Car3","Fam84b","Chrna6","Chrnb3","Fn1","Tac1","Lce3c","Erg",
+                      "Cdc42ep5","Bmp5","Pvalb","Depdc7","Stac","C1ql2","Ptgfr","Slco2a1",
+                      "Pappa2","Dppa1","Npsr1","Htr2c","Hpgd","Nxph3","Sla2","Tshz2",
+                      "Rapgef3","Slc17a8","Trh","Nxph2","Foxp2","Col12a1","Syt6","Col5a1",
+                      "Gpr139","Ly6d","Sla","Cpa6","Ppp1r18","Faim3","Ctxn3","Nxph4",
+                      "Cplx3","Ctgf","Col8a1","Mup5","Ngf","Fam150a","F2r","Serpinb11","Fbxl7",
+                      "P2ry12","Crh","Kynu","Hsd17b2","Mup3","Tlcd1","Lhx5","Trp73","Cpa6",
+                      "Gkn1","Col18a1","Lce3c","Erg","Bmp5","Stac","C1ql2","Slco2a1","Lrrc9",
+                      "Trhr","Myzap","Krt80","H60b","Fam150a","Clic5","Kcnj5","Olfr110",
+                      "Olfr111")))
+Ex.comb.markers <- c("Reln","Cdh13","Cpne7","Alcam","Rprm","Marcksl1")
+                            
+
+Global.markers <- list(c("Fez1","Phyhipl","Aplp1","Gnao1","Caly","Snap25","Atp1a3","Camk2b",
+                    "Syt1","Gabrg2","Fabp3","Stmn2","Kif5c","Slc32a1","Gad2","Dlx1","Dlx5",
+                    "Dlx2","Dlx6os1","Slc6a1","Sox2","Slc17a7","Nrn1","Neurod2","Sv2b","Satb2",
+                    "Tbr1","Vsig2","Cmtm5","Kcnj10","S100a16","S100a13","S1pr1","Gja1","Gjb6",
+                    "Aqp4","Lcat","Acsbg1","Olig1","Sox10","Neu4","Sapcd2","Gpr17","Plp1",
+                    "Cldn11","Mag","Mog","Nkx6-2","Enpp6","9630013A20Rik","Brca1",
+                    "Mog","Opalin","Gjb1","Hapln2","Cyba","Ctsh","Ifitm3","Sparc",
+                    "S100a11","Dcn","Col1a1","Pltp","Vtn","Slc6a13","Spp1","Slc13a3",
+                    "Col15a1","Slc47a1","Tgtp2","Ifi47","Esam","Slco1a4","Slc38a5",
+                    "Cldn5","H2-Q7","Slc38a11","Art3","Ace2","Acta2","Myh11","Pln",
+                    "Gja5","Kcnj8","Atp13a5","Aoc3","Ctss","C1qb","C1qc","C1qa","Cbr2",
+                    "F13a1","Pf4","Mrc1","Siglech","Selplg"))
+
+gallitano <- AddModuleScore(object = gallitano, 
+                           features = Ex.markers, 
+                           name = "Excitatory_marker_score")
+
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/UMAP_Excitatory_marker_score.png", width = 700, height = 700)
+
+FeaturePlot(object = gallitano, features = "Excitatory_marker_score1", label = T) + 
+  ggtitle("Excitatory marker score (refer to Tasic et al., 2018, Nature)")
+dev.off()
+
+gallitano <- AddModuleScore(object = gallitano, 
+                           features = Inh.markers, 
+                           name = "Inhibitory_marker_score")
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/UMAP_Inhibitory_marker_score.png", width = 700, height = 700)
+FeaturePlot(object = gallitano, features = "Inhibitory_marker_score1", label = T) + 
+  ggtitle("Inhibitory marker score (refer to Tasic et al., 2018, Nature)")
+dev.off()
+
+gallitano <- AddModuleScore(object = gallitano, 
+                           features = Global.markers, 
+                           name = "Global_marker_score")
+
+png(filename = "D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/UMAP_Global_marker_score.png", width = 700, height = 700)
+FeaturePlot(object = gallitano, features = "Global_marker_score1", label = T) + 
+  ggtitle("Global marker score (refer to Tasic et al., 2018, Nature)")
+dev.off()
+
+```
+
+```{r}
+# Generate a final RDS
+saveRDS(gallitano, "Gallitano_One_Brain_Sample.rds")
+```
+
+# the following block added by SQ
+```{r}
+library(ShinyCell)
+
+setwd("D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample")
+# getExampleData()    # Download example dataset (~200 MB) no need to run this if you run it before, with the .rds file in working directory
+# gallitano = readRDS("Gallitano_One_Brain_Sample.rds")
+scConf = createConfig(gallitano)
+makeShinyApp(gallitano, scConf, gene.mapping = TRUE,
+             shiny.title = "gallitano m10 one brain sample") 
+
+setwd("D:/Bioinformatics Projects/LindseyAanalysis/single_cell/one_brain_sample/shinyApp")
+
+shiny::runApp() # after you run this App, another R will be open, maximize it, then select and plot and test the graphic output. While this R window is open, the > ready in console will NOT be ready. You can also select output to browser. In order for the browser to work, you need to keep this new R window open. If you close the R window, the brower will gray out. 
+```
+

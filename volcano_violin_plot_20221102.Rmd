@@ -1,0 +1,253 @@
+---
+title: "Volcano_violin_plots_20221102"
+author: "Lian Chee Foong"
+date: "2022-11-02"
+output: html_document
+---
+
+```{r, eval=FALSE}
+getwd()
+setwd("C:\\Users\\lianc\\Documents")
+setwd("R_Brain/Heatmap_violinPlot_dendogram")
+
+#############################################################################
+# Use PBMC scRNAseq data
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+# Load the PBMC dataset
+pbmc.data <- Read10X(data.dir = "data/filtered_gene_bc_matrices/hg19")
+# Initialize the Seurat object with the raw (non-normalized data).
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+pbmc
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+pbmc <- NormalizeData(pbmc)
+pbmc <- FindVariableFeatures(pbmc, selection.method = "vst", nfeatures = 2000)
+all.genes <- rownames(pbmc)
+pbmc <- ScaleData(pbmc, features = all.genes)
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+pbmc <- FindNeighbors(pbmc, dims = 1:10)
+pbmc <- FindClusters(pbmc, resolution = 0.5)
+pbmc <- RunUMAP(pbmc, dims = 1:10)
+rm(pbmc.data)
+
+
+saveRDS(pbmc, file = "pbmc_tutorial.rds")
+#############################################################################
+```
+
+Run this step to obtain the cluster numbers
+
+```{r,  message=FALSE}
+# start here
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(ggrepel)
+library(RColorBrewer)
+
+pbmc <- readRDS("pbmc_tutorial.rds")
+Idents(pbmc) <- "RNA_snn_res.0.5" # change here to set the Idents to other metadata such as celltype or sample_group
+# then run findallmarkers to obtain markers comparing the defined groups
+Allmarkers <- FindAllMarkers(pbmc, only.pos = F) # get markers both in positive and negative avg_log2FC
+
+top_Allmarkers <- Allmarkers %>% filter(p_val_adj < 0.01) %>%
+  group_by(cluster) %>% 
+  top_n(n = 10, wt = abs(avg_log2FC))
+
+
+```
+
+Subset to cluster 0 and create volcano plot
+```{r, message=FALSE}
+Allmarkers_C0 <- Allmarkers %>% filter(cluster == "0")
+
+top_Allmarkers_C0_neg <- Allmarkers_C0 %>% filter(p_val_adj < 0.01) %>%  top_n(n = 10, wt = abs(avg_log2FC)) 
+top_Allmarkers_C0_pos <- Allmarkers_C0 %>% filter(p_val_adj < 0.01) %>%  top_n(n = 10, wt = avg_log2FC)
+label_genes <- c(top_Allmarkers_C0_neg$gene, top_Allmarkers_C0_pos$gene)
+
+# Create new categorical column ------------------------------------------------ 
+Allmarkers_C0 <- Allmarkers_C0 %>% 
+  mutate(gene_type = case_when(avg_log2FC >= 0 & p_val_adj <= 0.05 ~ "up",
+                                                                avg_log2FC < 0 & p_val_adj <= 0.05 ~ "down", 
+                                                                TRUE ~ "ns")) %>%
+  mutate(label = ifelse(gene %in% label_genes, gene, ""))
+
+# Obtain gene_type counts ------------------------------------------------------           
+Allmarkers_C0 %>% 
+  count(gene_type)
+
+#> [1] "down" "up"   "ns"    
+# Add colour, size and alpha (transparency) to volcano plot --------------------
+cols <- c("up" = "#ffad73", "down" = "#26b3ff", "ns" = "grey") 
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+
+  ggplot(Allmarkers_C0, aes(x = avg_log2FC,
+             y = -log10(p_val_adj),
+             fill = gene_type,    
+             size = gene_type,
+             alpha = gene_type)) + 
+  geom_point(shape = 21, # Specify shape and colour as fixed local parameters    
+             colour = "black") + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(1)),
+             linetype = "solid") + # Modify line type
+  scale_fill_manual(values = cols) + # Modify point colour
+  scale_size_manual(values = sizes) + # Modify point size
+  scale_alpha_manual(values = alphas) + # Modify point transparency
+  scale_x_continuous(breaks = c(seq(-6, 2, 2)),       
+                     limits = c(-6, 2))  +
+  geom_label_repel(aes(label = label),
+                   force = 2, 
+                   size = 3, # Modify label size
+                   fill = alpha(c("white"),1), 
+                   nudge_y = 1) +  theme_bw() +
+    theme(panel.border = element_rect(colour = "black", fill = NA, size= 0.5), 
+          text = element_text(size = 14)) 
+  
+```
+
+Create volcano plot based on the group (here I use clusters defined by RNA_snn_res.0.5 )
+
+```{r}  
+#############################################################################
+  Allmarkers_filter <- Allmarkers %>% filter(p_val_adj < 0.5)  
+  brewer.pal(9, "Spectral")
+  
+  Allmarkers <- Allmarkers %>% 
+    mutate(gene_type = case_when(avg_log2FC >= 0 & p_val_adj <= 0.05 ~ "up",
+                                 avg_log2FC < 0 & p_val_adj <= 0.05 ~ "down", 
+                                 TRUE ~ "ns")) %>%
+    mutate(label = ifelse(gene %in% Allmarkers_filter$gene, cluster, "")) 
+  # add a column "label" to specify the genes to color later in the volcano plot
+  # Here I target those genes with an adjusted pval < 0.5
+  
+  ggplot(Allmarkers, aes(x = avg_log2FC,
+                         y = -log10(p_val_adj),
+                         color = label)) + 
+    geom_point() + 
+    scale_color_manual(values = c("0" = "#D53E4F", # if the cluster has different variables, have to change accordingly here
+                                  "1" = "#F46D43", # or, it is ok to remove this section
+                                  "2" = "#FDAE61",
+                                  "3" = "#FEE08B",
+                                  "4" = "#FFFFBF",
+                                  "5" = "#E6F598",
+                                  "6" = "#ABDDA4",
+                                  "7" = "#66C2A5",
+                                  "8" = "#3288BD")) + # Modify point colour
+    scale_x_continuous(breaks = c(seq(-6, 2, 6)),       
+                       limits = c(-6, 6)) +  
+    ylim(c(0, 300)) +
+    theme_bw() +
+    theme(panel.border = element_rect(colour = "grey", fill = NA, size= 0.5), 
+          panel.grid = element_blank(),
+          text = element_text(size = 14),
+          legend.title = element_blank()) 
+
+
+```
+
+Create violin plot (mainly to deal with the ggplot2 parameters)
+
+```{r}   
+  #################################################################################
+  # Randomly select some genes from the highly variable gene list
+  var.features <- pbmc@assays$RNA@var.features 
+  
+  # Randomly created four groups (but you can use other metadata directly)
+  pbmc$group <- ifelse(pbmc$RNA_snn_res.0.5 %in% c("0","1"), "WT_SD",
+                       ifelse(pbmc$RNA_snn_res.0.5 %in% c("3","4"), "WT_Ctr",
+                              ifelse(pbmc$RNA_snn_res.0.5 %in% c("7","8"), "KO_SD","KO_Ctr")))
+  
+  # make a dataframe with all the data needed for ggplot2
+  mat <- pbmc[["RNA"]]@data[var.features, ] %>% as.matrix() 
+  ## scale the rows
+  mat<- t(scale(t(mat)))
+  pbmc_df <- data.frame(mat[ var.features[1],]) # var.features[1] can change to your selected gene name
+  colnames(pbmc_df) <- var.features[1] # Change column name into your selected gene name
+  pbmc_df <- data.frame(pbmc_df)
+  pbmc_df$Cell <- rownames(pbmc_df)
+  
+  # Add cell ID and identity classes
+  metadata <- pbmc@meta.data[,c("orig.ident","group")] # modified "group" to your selected metadata
+  metadata$Cell <- rownames(metadata)
+  pbmc_df <- left_join(pbmc_df, metadata, by = c("Cell"))
+  pbmc_df <- pbmc_df %>% reshape2::melt(pbmc_df, id.vars = c("Cell","group"),# modified "group" to your selected metadata
+                                        measure.vars = var.features[1], 
+                                        variable.name = "Feat", value.name = "Expr")
+  pbmc_df_1 <- pbmc_df %>% filter(group %in% c("WT_SD","WT_Ctr"))
+  pbmc_df_2 <- pbmc_df %>% filter(group %in% c("WT_SD","KO_SD"))                                          
+  pbmc_df_3 <- pbmc_df %>% filter(group %in% c("WT_Ctr","KO_Ctr"))                                          
+                                            
+  p1 <- ggplot(pbmc_df_1, aes(factor(group), Expr, fill = group)) + # modified "group" to your selected metadata
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    geom_jitter() +
+    theme_bw() + 
+    labs(title = "AB*",
+         subtitle = paste(var.features[1], "in Microglia cluster")) +
+    xlab("Group") + ylab("Normalized expression (log)") +
+    theme(legend.position = "none", 
+          panel.spacing = unit(0, "lines"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(),
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold"),
+          strip.text.y.left = element_text(angle = 0),
+          plot.title = element_text(size = 14, hjust = 0.5),
+          plot.subtitle = element_text(size = 10, hjust = 0.5)) 
+  
+  p2 <- ggplot(pbmc_df_2, aes(factor(group), Expr, fill = Feat)) +
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    geom_jitter() +
+    theme_bw() + 
+    labs(title = "AC",
+         subtitle = paste(var.features[1], "in Microglia cluster")) +
+    xlab("Group") + ylab("Normalized expression (log)") +
+    theme(legend.position = "none", 
+          panel.spacing = unit(0, "lines"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(),
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold"),
+          strip.text.y.left = element_text(angle = 0),
+          plot.title = element_text(size = 14, hjust = 0.5),
+          plot.subtitle = element_text(size = 10, hjust = 0.5)) 
+  
+  p3 <- ggplot(pbmc_df_3, aes(factor(group), Expr, fill = Feat)) +
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    geom_jitter() +
+    theme_bw() + 
+    labs(title = "BD",
+         subtitle = paste(var.features[1], "in Microglia cluster")) +
+    xlab("Group") + ylab("Normalized expression (log)") +
+    theme(legend.position = "none", 
+          panel.spacing = unit(0, "lines"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(),
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold"),
+          strip.text.y.left = element_text(angle = 0),
+          plot.title = element_text(size = 14, hjust = 0.5),
+          plot.subtitle = element_text(size = 10, hjust = 0.5)) 
+ 
+  combine_plot <- (p1+ p2+ p3) + plot_annotation(title =  "PPBP", theme = theme(plot.title = element_text(size = 15, hjust = 0.5)))
+  combine_plot
+  
+  
+  
+  
+```
